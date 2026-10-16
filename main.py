@@ -112,7 +112,9 @@ def check_pending_signals():
     remaining = deque()
     for sig in pending_signals:
         elapsed = (now - sig["time"]).total_seconds()
+        direction_text = "做多" if sig["direction"] == "long" else "做空"
 
+        # 3分钟验证 + 推送
         if not sig["checked_3m"] and elapsed >= 180:
             win = (current_price > sig["price"]) if sig["direction"] == "long" else (current_price < sig["price"])
             stats_3m["total"] += 1
@@ -120,8 +122,22 @@ def check_pending_signals():
                 stats_3m["win"] += 1
             sig["checked_3m"] = True
             rate_3m = stats_3m["win"] / stats_3m["total"] * 100 if stats_3m["total"] > 0 else 0
-            print(f">>> 3分钟验证: {'成功' if win else '失败'} | 当前3m成功率: {rate_3m:.1f}% ({stats_3m['win']}/{stats_3m['total']})")
+            
+            result = "成功 ✅" if win else "失败 ❌"
+            title = f"【3分钟验证】ETH {direction_text}信号"
+            content = f"""
+**验证时间**：{now.strftime('%H:%M:%S')}
+**信号方向**：{direction_text}
+**开仓价格**：{sig['price']:.2f}
+**当前价格**：{current_price:.2f}
+**结果**：{result}
 
+**当前3分钟成功率**：{rate_3m:.1f}%（{stats_3m['win']}/{stats_3m['total']}）
+"""
+            send_wechat(title, content)
+            print(f">>> 3分钟验证: {result} | 成功率: {rate_3m:.1f}%")
+
+        # 5分钟验证 + 推送
         if not sig["checked_5m"] and elapsed >= 300:
             win = (current_price > sig["price"]) if sig["direction"] == "long" else (current_price < sig["price"])
             stats_5m["total"] += 1
@@ -129,7 +145,20 @@ def check_pending_signals():
                 stats_5m["win"] += 1
             sig["checked_5m"] = True
             rate_5m = stats_5m["win"] / stats_5m["total"] * 100 if stats_5m["total"] > 0 else 0
-            print(f">>> 5分钟验证: {'成功' if win else '失败'} | 当前5m成功率: {rate_5m:.1f}% ({stats_5m['win']}/{stats_5m['total']})")
+            
+            result = "成功 ✅" if win else "失败 ❌"
+            title = f"【5分钟验证】ETH {direction_text}信号"
+            content = f"""
+**验证时间**：{now.strftime('%H:%M:%S')}
+**信号方向**：{direction_text}
+**开仓价格**：{sig['price']:.2f}
+**当前价格**：{current_price:.2f}
+**结果**：{result}
+
+**当前5分钟成功率**：{rate_5m:.1f}%（{stats_5m['win']}/{stats_5m['total']}）
+"""
+            send_wechat(title, content)
+            print(f">>> 5分钟验证: {result} | 成功率: {rate_5m:.1f}%")
 
         if not (sig["checked_3m"] and sig["checked_5m"]):
             remaining.append(sig)
@@ -143,7 +172,7 @@ def get_success_rate_text():
     return f"3分钟成功率: {rate_3m:.1f}% ({stats_3m['win']}/{stats_3m['total']})\n5分钟成功率: {rate_5m:.1f}% ({stats_5m['win']}/{stats_5m['total']})"
 
 print("=" * 50)
-print("ETH 事件合约信号监控已启动（含成功率统计）")
+print("ETH 事件合约信号监控已启动（验证结果会推送微信）")
 print("=" * 50)
 
 last_long_time = 0
