@@ -4,13 +4,13 @@ import pandas as pd
 from datetime import datetime
 from collections import deque
 
-# ==================== 配置区（最严格版） ====================
+# ==================== 配置区 ====================
 SERVERCHAN_SENDKEY = "SCT440554TBR9un4ZZPUOu6r28LJvNDpY8"
 
 SYMBOL = "ETH-USDT"
 CHECK_INTERVAL = 20
-MIN_BUY_SELL_RATIO = 4.0
-MIN_SELL_BUY_RATIO = 4.0
+MIN_BUY_SELL_RATIO = 4.2
+MIN_SELL_BUY_RATIO = 4.2
 
 NEAR_LOWER_15M = 0.12
 NEAR_LOWER_5M  = 0.10
@@ -20,12 +20,17 @@ NEAR_UPPER_15M = 0.12
 NEAR_UPPER_5M  = 0.10
 NEAR_UPPER_3M  = 0.08
 
-SIGNAL_COOLDOWN = 300
+SIGNAL_COOLDOWN = 180
+PRICE_DIFF_LIMIT = 0.15
 
-# ==================== 成功率统计 ====================
 pending_signals = deque()
 stats_3m = {"win": 0, "total": 0}
 stats_5m = {"win": 0, "total": 0}
+
+last_long_price = 0
+last_short_price = 0
+last_long_time = 0
+last_short_time = 0
 
 def send_wechat(title: str, content: str):
     url = f"https://sctapi.ftqq.com/{SERVERCHAN_SENDKEY}.send"
@@ -49,7 +54,7 @@ def get_okx_orderbook():
         print(f"欧意订单簿错误: {e}")
         return 0, 0
 
-def get_okx_klines(interval="15m", limit=50):
+def get_okx_klines(interval="15m", limit=100):
     try:
         url = f"https://www.okx.com/api/v5/market/candles?instId={SYMBOL}&bar={interval}&limit={limit}"
         data = requests.get(url, timeout=5).json()
@@ -81,9 +86,27 @@ def calculate_bollinger(df, period=20, std=2):
     df["lower"] = df["ma"] - std * df["std"]
     return df
 
+def calculate_rsi(df, period=14):
+    delta = df["close"].diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(period).mean()
+    avg_loss = loss.rolling(period).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.iloc[-1]
+
+def calculate_macd(df, fast=12, slow=26, signal=9):
+    exp1 = df["close"].ewm(span=fast, adjust=False).mean()
+    exp2 = df["close"].ewm(span=slow, adjust=False).mean()
+    dif = exp1 - exp2
+    dea = dif.ewm(span=signal, adjust=False).mean()
+    hist = dif - dea
+    return dif.iloc[-1], dea.iloc[-1], hist.iloc[-1], hist.iloc[-2]
+
 def get_bb_info(interval):
     df = get_okx_klines(interval)
-    if df is None or len(df) < 20:
+    if df is None or len(df) < 30:
         return None
     df = calculate_bollinger(df)
     latest = df.iloc[-1]
@@ -99,7 +122,8 @@ def get_bb_info(interval):
         "upper": upper,
         "mid": mid,
         "dist_lower": dist_lower,
-        "dist_upper": dist_upper
+        "dist_upper": dist_upper,
+        "df": df
     }
 
 def check_pending_signals():
@@ -168,11 +192,8 @@ def get_success_rate_text():
     return f"3分钟成功率: {rate_3m:.1f}% ({stats_3m['win']}/{stats_3m['total']})\n5分钟成功率: {rate_5m:.1f}% ({stats_5m['win']}/{stats_5m['total']})"
 
 print("=" * 50)
-print("ETH 事件合约信号监控已启动（最严格版）")
+print("ETH 事件合约信号监控已启动（布林+订单簿+RSI/MACD强信号）")
 print("=" * 50)
-
-last_long_time = 0
-last_short_time = 0
 
 while True:
     try:
@@ -195,32 +216,47 @@ while True:
         now_str = datetime.now().strftime("%H:%M:%S")
         now_ts = time.time()
 
-        # 做多：15m + 5m + 3m 都必须接近下轨
+        # 计算 RSI 和 MACD（用5分钟数据）
+        rsi = calculate_rsi(bb_5["df"])
+        dif, dea, hist, prev_hist = calculate_macd(bb_5["df"])
+
         near_lower_15 = bb_15["dist_lower"] < NEAR_LOWER_15M and price < bb_15["mid"]
         near_lower_5  = bb_5["dist_lower"] < NEAR_LOWER_5M
         near_lower_3  = bb_3["dist_lower"] < NEAR_LOWER_3M
         long_signal = (buy_sell_ratio >= MIN_BUY_SELL_RATIO) and near_lower_15 and near_lower_5 and near_lower_3
 
-        # 做空：15m + 5m + 3m 都必须接近上轨
         near_upper_15 = bb_15["dist_upper"] < NEAR_UPPER_15M and price > bb_15["mid"]
         near_upper_5  = bb_5["dist_upper"] < NEAR_UPPER_5M
         near_upper_3  = bb_3["dist_upper"] < NEAR_UPPER_3M
         short_signal = (sell_buy_ratio >= MIN_SELL_BUY_RATIO) and near_upper_15 and near_upper_5 and near_upper_3
 
+        # 强信号判断
+        long_strong = False
+        short_strong = False
+        if long_signal:
+            if rsi < 40 or (dif > dea and prev_hist < 0 and hist >= 0):
+                long_strong = True
+        if short_signal:
+            if rsi > 60 or (dif < dea and prev_hist > 0 and hist <= 0):
+                short_strong = True
+
         rate_text = get_success_rate_text()
-        print(f"[{now_str}] ETH价格:{price:.2f} | 下轨:{bb_15['dist_lower']:.2f}% | 上轨:{bb_15['dist_upper']:.2f}% | 买/卖:{buy_sell_ratio:.2f}")
+        print(f"[{now_str}] ETH:{price:.2f} | 下轨:{bb_15['dist_lower']:.2f}% | 上轨:{bb_15['dist_upper']:.2f}% | 买/卖:{buy_sell_ratio:.2f} | RSI:{rsi:.1f}")
         print(f"       {rate_text}")
 
-        if long_signal and (now_ts - last_long_time > SIGNAL_COOLDOWN):
-            pending_signals.append({
-                "time": datetime.now(),
-                "price": price,
-                "direction": "long",
-                "checked_3m": False,
-                "checked_5m": False
-            })
-            title = "【ETH做多信号】事件合约看涨（严格）"
-            content = f"""
+        if long_signal:
+            price_diff = abs(price - last_long_price) / price * 100 if last_long_price > 0 else 999
+            if (now_ts - last_long_time > SIGNAL_COOLDOWN) and (price_diff > PRICE_DIFF_LIMIT):
+                pending_signals.append({
+                    "time": datetime.now(),
+                    "price": price,
+                    "direction": "long",
+                    "checked_3m": False,
+                    "checked_5m": False
+                })
+                strong_tag = "【强信号】" if long_strong else ""
+                title = f"{strong_tag}【ETH做多信号】事件合约看涨"
+                content = f"""
 **时间**：{now_str}
 **ETH当前价格**：{price:.2f}
 
@@ -230,26 +266,34 @@ while True:
 - 3分钟：{bb_3['dist_lower']:.2f}%
 
 **欧意买/卖比**：{buy_sell_ratio:.2f}
+**RSI**：{rsi:.1f}
+**MACD**：{'金叉/转正' if long_strong and (dif > dea) else '普通'}
 
 **历史成功率**：
 {rate_text}
 
 建议：最小仓位开【看涨】3分钟或5分钟事件合约
 """
-            send_wechat(title, content)
-            print(">>> ETH做多信号已推送微信！")
-            last_long_time = now_ts
+                send_wechat(title, content)
+                print(f">>> ETH做多信号已推送微信！{'（强信号）' if long_strong else ''}")
+                last_long_time = now_ts
+                last_long_price = price
+            else:
+                print("（做多信号被防重复过滤）")
 
-        if short_signal and (now_ts - last_short_time > SIGNAL_COOLDOWN):
-            pending_signals.append({
-                "time": datetime.now(),
-                "price": price,
-                "direction": "short",
-                "checked_3m": False,
-                "checked_5m": False
-            })
-            title = "【ETH做空信号】事件合约看跌（严格）"
-            content = f"""
+        if short_signal:
+            price_diff = abs(price - last_short_price) / price * 100 if last_short_price > 0 else 999
+            if (now_ts - last_short_time > SIGNAL_COOLDOWN) and (price_diff > PRICE_DIFF_LIMIT):
+                pending_signals.append({
+                    "time": datetime.now(),
+                    "price": price,
+                    "direction": "short",
+                    "checked_3m": False,
+                    "checked_5m": False
+                })
+                strong_tag = "【强信号】" if short_strong else ""
+                title = f"{strong_tag}【ETH做空信号】事件合约看跌"
+                content = f"""
 **时间**：{now_str}
 **ETH当前价格**：{price:.2f}
 
@@ -259,15 +303,20 @@ while True:
 - 3分钟：{bb_3['dist_upper']:.2f}%
 
 **欧意卖/买比**：{sell_buy_ratio:.2f}
+**RSI**：{rsi:.1f}
+**MACD**：{'死叉/转负' if short_strong and (dif < dea) else '普通'}
 
 **历史成功率**：
 {rate_text}
 
 建议：最小仓位开【看跌】3分钟或5分钟事件合约
 """
-            send_wechat(title, content)
-            print(">>> ETH做空信号已推送微信！")
-            last_short_time = now_ts
+                send_wechat(title, content)
+                print(f">>> ETH做空信号已推送微信！{'（强信号）' if short_strong else ''}")
+                last_short_time = now_ts
+                last_short_price = price
+            else:
+                print("（做空信号被防重复过滤）")
 
         if not long_signal and not short_signal:
             print("暂无信号")
