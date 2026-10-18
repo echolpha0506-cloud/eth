@@ -22,7 +22,10 @@ BID_ASK_RATIO = 4.5
 SYMBOLS = ["BTC/USDT", "ETH/USDT"]
 TIMEFRAMES = ["3m", "5m", "15m"]
 PROXY = os.getenv("PROXY", "")
-SIGNAL_COOLDOWN = 180          # 冷却时间改为 3 分钟
+SIGNAL_COOLDOWN = 180          # 3分钟冷却
+
+# GMT+8 时区
+GMT8 = timezone(timedelta(hours=8))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -54,6 +57,10 @@ stats = {
     "total": 0,
     "win": 0
 }
+
+def now_gmt8():
+    """返回当前 GMT+8 时间"""
+    return datetime.now(GMT8)
 
 def send_wechat(title: str, content: str):
     if not SERVERCHAN_SENDKEY:
@@ -126,7 +133,6 @@ def check_signal(symbol: str) -> Optional[Dict]:
         flat_5 = is_flat(dfs["5m"]["ma"])
         flat_3 = is_flat(dfs["3m"]["ma"])
 
-        # 必须三个周期全部走平
         if not (flat_15 and flat_5 and flat_3):
             return None
 
@@ -171,7 +177,7 @@ def check_signal(symbol: str) -> Optional[Dict]:
                 "okx_ratio": okx_ratio,
                 "flat": f"15m:{flat_15} 5m:{flat_5} 3m:{flat_3}",
                 "reason": " | ".join(reason),
-                "time": datetime.now(timezone.utc).isoformat()
+                "time": now_gmt8().strftime("%Y-%m-%d %H:%M:%S")
             }
         return None
     except Exception as e:
@@ -179,7 +185,7 @@ def check_signal(symbol: str) -> Optional[Dict]:
         return None
 
 def start_simulation(signal: Dict):
-    now = datetime.now(timezone.utc)
+    now = now_gmt8()
     for minutes in [3, 5]:
         sim = {
             "id": f"{signal['symbol']}_{signal['direction']}_{minutes}m_{int(now.timestamp())}",
@@ -197,7 +203,7 @@ def start_simulation(signal: Dict):
         logger.info(f"启动模拟: {sim['id']}")
 
 def check_simulations():
-    now = datetime.now(timezone.utc)
+    now = now_gmt8()
     for sim in simulations[:]:
         if sim["status"] != "open":
             continue
@@ -213,7 +219,6 @@ def check_simulations():
                 sim["result"] = "WIN" if win else "LOSS"
                 sim["status"] = "closed"
 
-                # 更新胜率统计
                 stats["total"] += 1
                 if win:
                     stats["win"] += 1
@@ -253,7 +258,7 @@ def start_health_server():
     logger.info(f"Health server running on port {port}")
 
 def main():
-    logger.info("信号机器人启动（提高胜率版 + 3分钟冷却 + 胜率统计），监控 BTC + ETH")
+    logger.info("信号机器人启动（提高胜率版 + GMT+8 + 胜率统计），监控 BTC + ETH")
     start_health_server()
 
     last_signal_time = {}
@@ -262,7 +267,7 @@ def main():
     while True:
         try:
             loop_count += 1
-            now_str = datetime.now(timezone.utc).strftime("%H:%M:%S")
+            now_str = now_gmt8().strftime("%H:%M:%S")
             logger.info(f"【心跳】第 {loop_count} 轮检查开始 ({now_str})")
 
             check_simulations()
@@ -271,14 +276,14 @@ def main():
                 signal = check_signal(symbol)
                 if signal:
                     key = f"{symbol}_{signal['direction']}"
-                    if key in last_signal_time and (datetime.now(timezone.utc) - last_signal_time[key]).seconds < SIGNAL_COOLDOWN:
+                    if key in last_signal_time and (now_gmt8() - last_signal_time[key]).seconds < SIGNAL_COOLDOWN:
                         continue
 
-                    last_signal_time[key] = datetime.now(timezone.utc)
+                    last_signal_time[key] = now_gmt8()
 
                     title = f"【开单信号】{symbol} {'做多' if signal['direction']=='long' else '做空'}"
                     content = f"""
-**时间**: {signal['time']}
+**时间**: {signal['time']} (GMT+8)
 **品种**: {symbol}
 **方向**: **{'做多 (买涨)' if signal['direction']=='long' else '做空 (买跌)'}**
 **当前价**: {signal['price']:.2f}
@@ -293,7 +298,6 @@ def main():
                     start_simulation(signal)
                     logger.info(f"发出信号: {title}")
 
-            # 每10轮打印一次当前胜率
             if loop_count % 10 == 0 and stats["total"] > 0:
                 win_rate = stats["win"] / stats["total"] * 100
                 logger.info(f"【胜率统计】当前模拟胜率: {stats['win']}/{stats['total']} = {win_rate:.1f}%")
