@@ -13,14 +13,18 @@ import requests
 import numpy as np
 
 # ==================== 配置 ====================
-SERVERCHAN_SENDKEY = os.getenv("SERVERCHAN_SENDKEY", "")  # 在 Railway Variables 里设置
-CHECK_INTERVAL = 45          # 检查间隔（秒）
+SERVERCHAN_SENDKEY = os.getenv("SERVERCHAN_SENDKEY", "")
+CHECK_INTERVAL = 45
 BB_PERIOD = 20
 BB_STD = 2
-FLAT_THRESHOLD = 0.0008      # 布林中轨走平阈值
-BID_ASK_RATIO = 3.0          # 买盘/卖盘最小倍数
+FLAT_THRESHOLD = 0.0008
+BID_ASK_RATIO = 3.0
 SYMBOLS = ["BTC/USDT", "ETH/USDT"]
 TIMEFRAMES = ["3m", "5m", "15m"]
+
+# 代理（可选，如果以后想用币安可以填）
+# 格式示例: http://user:pass@ip:port  或  socks5://ip:port
+PROXY = os.getenv("PROXY", "")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,13 +33,30 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-binance = ccxt.binance({"enableRateLimit": True, "options": {"defaultType": "spot"}})
-okx = ccxt.okx({"enableRateLimit": True, "options": {"defaultType": "spot"}})
+# ==================== 交易所初始化（优先用 OKX） ====================
+exchange_config = {"enableRateLimit": True, "options": {"defaultType": "spot"}}
+
+if PROXY:
+    exchange_config["proxies"] = {
+        "http": PROXY,
+        "https": PROXY,
+    }
+
+# 主数据源用 OKX（更不容易被墙）
+okx = ccxt.okx(exchange_config)
+
+# 币安作为备用（如果配置了代理才真正使用）
+binance = None
+if PROXY:
+    try:
+        binance = ccxt.binance(exchange_config)
+        logger.info("已启用币安（通过代理）")
+    except Exception as e:
+        logger.warning(f"币安初始化失败: {e}")
 
 simulations: List[Dict] = []
 
 def send_wechat(title: str, content: str):
-    """Server酱推送"""
     if not SERVERCHAN_SENDKEY:
         logger.warning("未配置 SERVERCHAN_SENDKEY，跳过推送")
         return
@@ -51,10 +72,7 @@ def send_wechat(title: str, content: str):
     else:
         url = f"https://sctapi.ftqq.com/{SERVERCHAN_SENDKEY}.send"
 
-    payload = {
-        "title": title,
-        "desp": content
-    }
+    payload = {"title": title, "desp": content}
 
     try:
         r = requests.post(url, data=payload, timeout=10)
@@ -101,9 +119,10 @@ def fetch_ohlcv(exchange, symbol: str, timeframe: str, limit: int = 50) -> pd.Da
 
 def check_signal(symbol: str) -> Optional[Dict]:
     try:
+        # 优先使用 OKX 获取K线
         dfs = {}
         for tf in TIMEFRAMES:
-            dfs[tf] = calc_bollinger(fetch_ohlcv(binance, symbol, tf))
+            dfs[tf] = calc_bollinger(fetch_ohlcv(okx, symbol, tf))
 
         flat_15 = is_flat(dfs["15m"]["ma"])
         flat_5 = is_flat(dfs["5m"]["ma"])
@@ -122,16 +141,23 @@ def check_signal(symbol: str) -> Optional[Dict]:
         near_lower = abs(price - lower) / lower < 0.002
         near_upper = abs(price - upper) / upper < 0.002
 
-        binance_ratio = get_orderbook_ratio(binance, symbol)
+        # 盘口：同时看 OKX + 币安（如果有）
         okx_ratio = get_orderbook_ratio(okx, symbol)
+        binance_ratio = okx_ratio  # 默认用 OKX
+
+        if binance:
+            try:
+                binance_ratio = get_orderbook_ratio(binance, symbol)
+            except:
+                pass
 
         direction = None
         reason = []
 
-        if (near_mid or near_lower) and binance_ratio >= BID_ASK_RATIO and okx_ratio >= BID_ASK_RATIO:
+        if (near_mid or near_lower) and okx_ratio >= BID_ASK_RATIO and binance_ratio >= BID_ASK_RATIO:
             direction = "long"
-            reason.append(f"回踩中/下轨 + 两边买盘占优 (币安{binance_ratio:.1f}x 欧意{okx_ratio:.1f}x)")
-        elif near_upper and binance_ratio <= (1 / BID_ASK_RATIO) and okx_ratio <= (1 / BID_ASK_RATIO):
+            reason.append(f"回踩中/下轨 + 两边买盘占优 (OKX {okx_ratio:.1f}x 币安{binance_ratio:.1f}x)")
+        elif near_upper and okx_ratio <= (1 / BID_ASK_RATIO) and binance_ratio <= (1 / BID_ASK_RATIO):
             direction = "short"
             reason.append("触及上轨 + 两边卖盘占优")
 
@@ -179,7 +205,7 @@ def check_simulations():
             continue
         if now >= sim["expire_time"]:
             try:
-                ticker = binance.fetch_ticker(sim["symbol"])
+                ticker = okx.fetch_ticker(sim["symbol"])
                 exit_price = float(ticker["last"])
                 sim["exit_price"] = exit_price
                 if sim["direction"] == "long":
@@ -219,7 +245,7 @@ def start_health_server():
     logger.info(f"Health server running on port {port}")
 
 def main():
-    logger.info("信号机器人启动（Server酱版），监控 BTC + ETH")
+    logger.info("信号机器人启动（OKX 主数据源 + Server酱），监控 BTC + ETH")
     start_health_server()
 
     last_signal_time = {}
@@ -244,7 +270,7 @@ def main():
 **方向**: **{'做多 (买涨)' if signal['direction']=='long' else '做空 (买跌)'}**
 **当前价**: {signal['price']:.2f}
 **15分中轨**: {signal['mid']:.2f}
-**盘口**: 币安买/卖={signal['binance_ratio']:.1f}  欧意={signal['okx_ratio']:.1f}
+**盘口**: OKX={signal['okx_ratio']:.1f}  币安={signal['binance_ratio']:.1f}
 **布林走平**: {signal['flat']}
 **理由**: {signal['reason']}
 
