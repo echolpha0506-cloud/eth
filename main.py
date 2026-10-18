@@ -9,16 +9,16 @@ SERVERCHAN_SENDKEY = "SCT440554TBR9un4ZZPUOu6r28LJvNDpY8"
 
 SYMBOL = "ETH-USDT"
 CHECK_INTERVAL = 20
-MIN_BUY_SELL_RATIO = 4.2
-MIN_SELL_BUY_RATIO = 4.2
+MIN_BUY_SELL_RATIO = 3.8
+MIN_SELL_BUY_RATIO = 3.8
 
-NEAR_LOWER_15M = 0.12
-NEAR_LOWER_5M  = 0.10
-NEAR_LOWER_3M  = 0.08
+NEAR_LOWER_15M = 0.15
+NEAR_LOWER_5M  = 0.12
+NEAR_LOWER_3M  = 0.10
 
-NEAR_UPPER_15M = 0.12
-NEAR_UPPER_5M  = 0.10
-NEAR_UPPER_3M  = 0.08
+NEAR_UPPER_15M = 0.15
+NEAR_UPPER_5M  = 0.12
+NEAR_UPPER_3M  = 0.10
 
 SIGNAL_COOLDOWN = 180
 PRICE_DIFF_LIMIT = 0.15
@@ -192,7 +192,7 @@ def get_success_rate_text():
     return f"3分钟成功率: {rate_3m:.1f}% ({stats_3m['win']}/{stats_3m['total']})\n5分钟成功率: {rate_5m:.1f}% ({stats_5m['win']}/{stats_5m['total']})"
 
 print("=" * 50)
-print("ETH 事件合约信号监控已启动（布林+订单簿+RSI/MACD强信号）")
+print("ETH 事件合约信号监控已启动（指定参数版）")
 print("=" * 50)
 
 while True:
@@ -216,7 +216,6 @@ while True:
         now_str = datetime.now().strftime("%H:%M:%S")
         now_ts = time.time()
 
-        # 计算 RSI 和 MACD（用5分钟数据）
         rsi = calculate_rsi(bb_5["df"])
         dif, dea, hist, prev_hist = calculate_macd(bb_5["df"])
 
@@ -230,7 +229,6 @@ while True:
         near_upper_3  = bb_3["dist_upper"] < NEAR_UPPER_3M
         short_signal = (sell_buy_ratio >= MIN_SELL_BUY_RATIO) and near_upper_15 and near_upper_5 and near_upper_3
 
-        # 强信号判断
         long_strong = False
         short_strong = False
         if long_signal:
