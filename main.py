@@ -17,11 +17,12 @@ SERVERCHAN_SENDKEY = os.getenv("SERVERCHAN_SENDKEY", "")
 CHECK_INTERVAL = 45
 BB_PERIOD = 20
 BB_STD = 2
-FLAT_THRESHOLD = 0.0008
-BID_ASK_RATIO = 3.0
+FLAT_THRESHOLD = 0.00045
+BID_ASK_RATIO = 4.5
 SYMBOLS = ["BTC/USDT", "ETH/USDT"]
 TIMEFRAMES = ["3m", "5m", "15m"]
 PROXY = os.getenv("PROXY", "")
+SIGNAL_COOLDOWN = 180          # 冷却时间改为 3 分钟
 
 logging.basicConfig(
     level=logging.INFO,
@@ -47,6 +48,12 @@ if PROXY:
         logger.warning(f"币安初始化失败: {e}")
 
 simulations: List[Dict] = []
+
+# 模拟胜率统计
+stats = {
+    "total": 0,
+    "win": 0
+}
 
 def send_wechat(title: str, content: str):
     if not SERVERCHAN_SENDKEY:
@@ -119,7 +126,8 @@ def check_signal(symbol: str) -> Optional[Dict]:
         flat_5 = is_flat(dfs["5m"]["ma"])
         flat_3 = is_flat(dfs["3m"]["ma"])
 
-        if not (flat_15 and (flat_5 or flat_3)):
+        # 必须三个周期全部走平
+        if not (flat_15 and flat_5 and flat_3):
             return None
 
         last = dfs["15m"].iloc[-1]
@@ -128,9 +136,9 @@ def check_signal(symbol: str) -> Optional[Dict]:
         lower = float(last["lower"])
         upper = float(last["upper"])
 
-        near_mid = abs(price - mid) / mid < 0.0015
-        near_lower = abs(price - lower) / lower < 0.002
-        near_upper = abs(price - upper) / upper < 0.002
+        near_mid = abs(price - mid) / mid < 0.0010
+        near_lower = abs(price - lower) / lower < 0.0015
+        near_upper = abs(price - upper) / upper < 0.0015
 
         okx_ratio = get_orderbook_ratio(okx, symbol)
         binance_ratio = okx_ratio
@@ -205,6 +213,13 @@ def check_simulations():
                 sim["result"] = "WIN" if win else "LOSS"
                 sim["status"] = "closed"
 
+                # 更新胜率统计
+                stats["total"] += 1
+                if win:
+                    stats["win"] += 1
+
+                win_rate = (stats["win"] / stats["total"] * 100) if stats["total"] > 0 else 0
+
                 title = f"【模拟结算】{sim['symbol']} {sim['minutes']}分钟 {sim['result']}"
                 content = f"""
 **品种**: {sim['symbol']}
@@ -213,9 +228,12 @@ def check_simulations():
 **结算价**: {exit_price:.2f}
 **时长**: {sim['minutes']}分钟
 **结果**: **{sim['result']}**
+
+---
+**当前模拟胜率**: {stats['win']}/{stats['total']} = **{win_rate:.1f}%**
 """
                 send_wechat(title, content)
-                logger.info(f"模拟结算: {sim['id']} → {sim['result']}")
+                logger.info(f"模拟结算: {sim['id']} → {sim['result']} | 胜率 {win_rate:.1f}% ({stats['win']}/{stats['total']})")
             except Exception as e:
                 logger.error(f"结算失败: {e}")
 
@@ -235,7 +253,7 @@ def start_health_server():
     logger.info(f"Health server running on port {port}")
 
 def main():
-    logger.info("信号机器人启动（OKX 主数据源 + Server酱），监控 BTC + ETH")
+    logger.info("信号机器人启动（提高胜率版 + 3分钟冷却 + 胜率统计），监控 BTC + ETH")
     start_health_server()
 
     last_signal_time = {}
@@ -253,7 +271,7 @@ def main():
                 signal = check_signal(symbol)
                 if signal:
                     key = f"{symbol}_{signal['direction']}"
-                    if key in last_signal_time and (datetime.now(timezone.utc) - last_signal_time[key]).seconds < 480:
+                    if key in last_signal_time and (datetime.now(timezone.utc) - last_signal_time[key]).seconds < SIGNAL_COOLDOWN:
                         continue
 
                     last_signal_time[key] = datetime.now(timezone.utc)
@@ -274,6 +292,11 @@ def main():
                     send_wechat(title, content)
                     start_simulation(signal)
                     logger.info(f"发出信号: {title}")
+
+            # 每10轮打印一次当前胜率
+            if loop_count % 10 == 0 and stats["total"] > 0:
+                win_rate = stats["win"] / stats["total"] * 100
+                logger.info(f"【胜率统计】当前模拟胜率: {stats['win']}/{stats['total']} = {win_rate:.1f}%")
 
             logger.info(f"【心跳】第 {loop_count} 轮检查完成，休眠 {CHECK_INTERVAL} 秒")
             time.sleep(CHECK_INTERVAL)
