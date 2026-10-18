@@ -2,7 +2,7 @@ import os
 import time
 import re
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -22,8 +22,7 @@ BID_ASK_RATIO = 3.0
 SYMBOLS = ["BTC/USDT", "ETH/USDT"]
 TIMEFRAMES = ["3m", "5m", "15m"]
 
-# 代理（可选，如果以后想用币安可以填）
-# 格式示例: http://user:pass@ip:port  或  socks5://ip:port
+# 可选代理（如果以后想强制用币安）
 PROXY = os.getenv("PROXY", "")
 
 logging.basicConfig(
@@ -33,7 +32,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ==================== 交易所初始化（优先用 OKX） ====================
+# ==================== 交易所初始化（优先 OKX） ====================
 exchange_config = {"enableRateLimit": True, "options": {"defaultType": "spot"}}
 
 if PROXY:
@@ -42,10 +41,8 @@ if PROXY:
         "https": PROXY,
     }
 
-# 主数据源用 OKX（更不容易被墙）
 okx = ccxt.okx(exchange_config)
 
-# 币安作为备用（如果配置了代理才真正使用）
 binance = None
 if PROXY:
     try:
@@ -119,7 +116,6 @@ def fetch_ohlcv(exchange, symbol: str, timeframe: str, limit: int = 50) -> pd.Da
 
 def check_signal(symbol: str) -> Optional[Dict]:
     try:
-        # 优先使用 OKX 获取K线
         dfs = {}
         for tf in TIMEFRAMES:
             dfs[tf] = calc_bollinger(fetch_ohlcv(okx, symbol, tf))
@@ -141,14 +137,13 @@ def check_signal(symbol: str) -> Optional[Dict]:
         near_lower = abs(price - lower) / lower < 0.002
         near_upper = abs(price - upper) / upper < 0.002
 
-        # 盘口：同时看 OKX + 币安（如果有）
         okx_ratio = get_orderbook_ratio(okx, symbol)
-        binance_ratio = okx_ratio  # 默认用 OKX
+        binance_ratio = okx_ratio
 
         if binance:
             try:
                 binance_ratio = get_orderbook_ratio(binance, symbol)
-            except:
+            except Exception:
                 pass
 
         direction = None
@@ -173,7 +168,7 @@ def check_signal(symbol: str) -> Optional[Dict]:
                 "okx_ratio": okx_ratio,
                 "flat": f"15m:{flat_15} 5m:{flat_5} 3m:{flat_3}",
                 "reason": " | ".join(reason),
-                "time": datetime.utcnow().isoformat()
+                "time": datetime.now(timezone.utc).isoformat()
             }
         return None
     except Exception as e:
@@ -181,7 +176,7 @@ def check_signal(symbol: str) -> Optional[Dict]:
         return None
 
 def start_simulation(signal: Dict):
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     for minutes in [3, 5]:
         sim = {
             "id": f"{signal['symbol']}_{signal['direction']}_{minutes}m_{int(now.timestamp())}",
@@ -199,7 +194,7 @@ def start_simulation(signal: Dict):
         logger.info(f"启动模拟: {sim['id']}")
 
 def check_simulations():
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     for sim in simulations[:]:
         if sim["status"] != "open":
             continue
@@ -258,10 +253,10 @@ def main():
                 signal = check_signal(symbol)
                 if signal:
                     key = f"{symbol}_{signal['direction']}"
-                    if key in last_signal_time and (datetime.utcnow() - last_signal_time[key]).seconds < 480:
+                    if key in last_signal_time and (datetime.now(timezone.utc) - last_signal_time[key]).seconds < 480:
                         continue
 
-                    last_signal_time[key] = datetime.utcnow()
+                    last_signal_time[key] = datetime.now(timezone.utc)
 
                     title = f"【开单信号】{symbol} {'做多' if signal['direction']=='long' else '做空'}"
                     content = f"""
