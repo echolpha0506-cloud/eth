@@ -21,8 +21,6 @@ FLAT_THRESHOLD = 0.0008
 BID_ASK_RATIO = 3.0
 SYMBOLS = ["BTC/USDT", "ETH/USDT"]
 TIMEFRAMES = ["3m", "5m", "15m"]
-
-# 可选代理（如果以后想强制用币安）
 PROXY = os.getenv("PROXY", "")
 
 logging.basicConfig(
@@ -32,14 +30,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ==================== 交易所初始化（优先 OKX） ====================
+# ==================== 交易所 ====================
 exchange_config = {"enableRateLimit": True, "options": {"defaultType": "spot"}}
 
 if PROXY:
-    exchange_config["proxies"] = {
-        "http": PROXY,
-        "https": PROXY,
-    }
+    exchange_config["proxies"] = {"http": PROXY, "https": PROXY}
 
 okx = ccxt.okx(exchange_config)
 
@@ -244,9 +239,14 @@ def main():
     start_health_server()
 
     last_signal_time = {}
+    loop_count = 0
 
     while True:
         try:
+            loop_count += 1
+            now_str = datetime.now(timezone.utc).strftime("%H:%M:%S")
+            logger.info(f"【心跳】第 {loop_count} 轮检查开始 ({now_str})")
+
             check_simulations()
 
             for symbol in SYMBOLS:
@@ -275,7 +275,9 @@ def main():
                     start_simulation(signal)
                     logger.info(f"发出信号: {title}")
 
+            logger.info(f"【心跳】第 {loop_count} 轮检查完成，休眠 {CHECK_INTERVAL} 秒")
             time.sleep(CHECK_INTERVAL)
+
         except Exception as e:
             logger.error(f"主循环异常: {e}")
             time.sleep(30)
